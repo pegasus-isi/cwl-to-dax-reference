@@ -9,8 +9,8 @@ import shutil
 from yaml import Loader, load
 
 # TODO: these need to be changed when this script is added to pegasus master
-#sys.path.insert(0, "/nfs/u2/tanaka/pegasus/lib/pegasus/python")
-sys.path.insert(0, "/Users/ryantanaka/ISI/pegasus/dist/pegasus-5.0.0dev/lib/pegasus/python")
+sys.path.insert(0, "/nfs/u2/tanaka/pegasus/lib/pegasus/python")
+#sys.path.insert(0, "/Users/ryantanaka/ISI/pegasus/dist/pegasus-5.0.0dev/lib/pegasus/python")
 from Pegasus.DAX3 import *
 import cwl_utils.parser_v1_0 as cwl
 
@@ -142,7 +142,6 @@ def main():
 
         # get the inputs of this step
         step_inputs = {get_basename(input.id) : get_basename(input.source) for input in step.in_}
-        print(step_inputs)
 
         # add input uses to job
         for input in cwl_command_line_tool.inputs:

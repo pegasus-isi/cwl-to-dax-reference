@@ -19,7 +19,7 @@ envsubst < sites.xml.template > sites.xml
 envsubst < ../input.yml.template > ../input.yml
 
 # generate workflow
-#../../pegasus-cwl-converter.py ../workflow.cwl ../input.yml ./workflow.xml
+../../pegasus-cwl-converter.py ../workflow.cwl ../input.yml ./workflow.xml
 
 # plan and submit the  workflow
 pegasus-plan \
