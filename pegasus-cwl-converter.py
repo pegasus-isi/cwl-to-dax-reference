@@ -5,6 +5,7 @@ import argparse
 import sys
 import os
 import shutil
+from collections import namedtuple
 from pprint import pformat
 
 from yaml import Loader, load
@@ -19,20 +20,27 @@ log = logging.getLogger("logger")
 
 # --- script setup -------------------------------------------------------------------
 class ColoredFormatter(logging.Formatter):
-    # printing debug level logs in yellow 
-    debug_format = "\u001b[33m %(asctime)s %(levelname)7s:  %(message)s at line %(lineno)d: \u001b[0m"
-    info_format = "%(asctime)s %(levelname)7s:  %(message)s"
+    # printing debug level logs in yellow
+    debug_format = "\u001b[33m%(asctime)s %(levelname)7s:  %(message)s at line %(lineno)d: \u001b[0m"
 
     def __init__(self):
         super().__init__("%(asctime)s %(levelname)7s:  %(message)s")
 
     def format(self, record):
+
+        # save the original format
+        fmt_orig = self._style._fmt
+
         if record.levelno == logging.DEBUG:
             self._style._fmt = ColoredFormatter.debug_format
-        elif record.levelno == logging.INFO:
-            self._style._fmt = ColoredFormatter.info_format
 
-        return logging.Formatter.format(self, record)
+        # Call the original formatter class to do the grunt work
+        result = logging.Formatter.format(self, record)
+
+        # revert format back to original
+        self._style._fmt = fmt_orig
+
+        return result
 
 def setup_logger(debug_flag):
    # log to the console
@@ -83,39 +91,60 @@ class ReplicaCatalog:
     # TODO: possibly make a catalog type, as the behavior here is almost the
     #       same as ReplicaCatalog
     def __init__(self):
-        self.items = set()
+        self.entries = set()
 
     # TODO: account for more complex entries into the catalog
     def add_item(self, lfn, pfn, site):
         entry = "{0} {1} site={2}".format(lfn, pfn, site)
         log.debug("Adding to RC: '{}'".format(entry))
-        self.items.add(entry)
+        self.entries.add(entry)
 
     def write_catalog(self, filename):
         log.info("Writing replica catalog to {}".format(filename))
         with open(filename, "w") as rc:
-            for item in self.items:
-                rc.write(item + "\n")
+            for entry in self.entries:
+                rc.write(entry + "\n")
 
 
 class TransformationCatalog:
+
+    Entry = namedtuple("Entry", ["base_command", "is_stageable"])
+
     # TODO: make this more comprehensive
     def __init__(self):
-        self.items = set()
+        self.entries = set()
 
     # TODO: account for more complex entries into the catalog
-    def add_item(self, name, pfn):
-        entry = (name, pfn)
-        log.debug("Adding to TC: {}".format(entry))
-        self.items.add(entry)
+    # TODO: this will need to write to YAML file in 5.0
+    # TODO: if pfn is relative, then assume stageable,
+    #       else assume it isn't. Need to see if there is a
+    #       field in command line tool that specifies
+    #       whether or not this tool is stageable
+    def add_item(self, base_command):
+        is_stageable = os.path.isabs(base_command)
+
+        if is_stageable:
+            log.warning(("CommandLineTool.baseName: '{}', is an absolute path, "
+                        "assuming to be NOT stageable.").format(base_command))
+            log.debug("Adding to TC: {}".format(base_command))
+
+        else:
+            log.warning(("CommandLineTool.baseName: '{}', is not an absolute path, "
+                        "assuming to be stageable.").format(base_command))
+            log.debug("Adding to TC: {}, type: STAGEABLE".format(base_command))
+
+        self.entries.add(TransformationCatalog.Entry(base_command, is_stageable))
 
     def write_catalog(self, filename):
         log.info("Writing tranformation catalog to {}".format(filename))
         with open(filename, "w") as tc:
-            for item in self.items:
-                tc.write("tr {} {{\n".format(item[0]))
+            for entry in self.entries:
+                tc.write("tr {} {{\n".format(entry.base_command))
+                # TODO: handle different sites
                 tc.write("    site condorpool {\n")
-                tc.write("        pfn \"{}\"\n".format(item[1]))
+                tc.write("        pfn \"{}\"\n".format(entry.base_command))
+                if not entry.is_stageable:
+                    tc.write("        type \"STAGEABLE\"\n")
                 tc.write("    }\n")
                 tc.write("}\n")
 
@@ -144,15 +173,24 @@ def main():
     log.info("Collecting inputs in {}".format(args.input_file_spec_path))
     with open(args.input_file_spec_path, "r") as yaml_file:
         input_file_specs = load(yaml_file, Loader=Loader)
-        for id, fields in input_file_specs.items():
-            # TODO: account for types File[] and string[]
-            if isinstance(fields, dict):
-                if fields["class"] == "File":
-                    workflow_files[id] = id
-                    rc.add_item(id, fields["path"], "local")
-            elif isinstance(fields, str):
-                workflow_input_strings[id] = fields
 
+        for input in workflow.inputs:
+            input_type = input.type
+
+            if input_type == "File":
+                workflow_files[get_basename(input.id)] = get_basename(input.id)
+                # TODO: account for non-local sites
+                rc.add_item(get_basename(input.id), input_file_specs[get_basename(input.id)]["path"], "local")
+            elif input_type == "string":
+                workflow_input_strings[get_basename(input.id)] = \
+                                        input_file_specs[get_basename(input.id)]
+            elif isinstance(input_type, cwl.InputArraySchema):
+                if input_type.items == "File":
+                    # TODO: account for workflow inputs of type File[]
+                    pass
+                elif input_type.items == "string":
+                    workflow_input_strings[get_basename(input.id)] = \
+                                        input_file_specs[get_basename(input.id)]
 
     log.info("Collecting output files")
     for step in workflow.steps:
@@ -181,14 +219,18 @@ def main():
         dax_executable = dax.Executable(cwl_command_line_tool.baseCommand)
 
         # add executable to transformation catalog
-        tc.add_item(cwl_command_line_tool.baseCommand, cwl_command_line_tool.baseCommand)
+        tc.add_item(cwl_command_line_tool.baseCommand)
 
         # create job with executable
         dax_job = dax.Job(dax_executable)
 
-        # get the inputs of this step
-        step_inputs = {get_basename(input.id) : get_basename(input.source) \
-                                                            for input in step.in_}
+        step_inputs = dict()
+        for input in step.in_:
+            input_id = get_basename(input.id)
+            if isinstance(input.source, str):
+                step_inputs[input_id] = get_basename(input.source)
+            elif isinstance(input.source, list):
+                step_inputs[input_id] = [get_basename(file) for file in input.source]
 
         # add input uses to job
         for input in cwl_command_line_tool.inputs:
@@ -205,6 +247,25 @@ def main():
                     file,
                     link=dax.Link.INPUT
                 )
+
+            # TODO: better type checking for string[] and File[] ?
+            elif isinstance(input.type, cwl.CommandInputArraySchema):
+                if input.type.items == "File":
+                    file_ids = step_inputs[get_name(step.id, input.id)]
+                    for file_id in file_ids:
+                        log.debug(file)
+                        file = dax.File(workflow_files[file_id])
+                        log.debug("Adding link ({0} -> {1})".format(
+                                        file_id,
+                                        dax_job.name
+                                        )
+                        )
+
+                        dax_job.uses(
+                            file,
+                            link=dax.Link.INPUT
+                        )
+
 
         # add output uses to job
         # TODO: ensure that these are of type File or File[]
@@ -246,23 +307,30 @@ def main():
                         )
                     )
 
-                # TODO: take into account string inputs that are outputs of other steps
-                #       and not just workflow inputs
+                if input.type == "string":
+                    dax_job_args.append(workflow_input_strings[
+                            step_inputs[get_name(step.id, input.id)]
+                        ]
+                    )
 
-                input_string_id = step_inputs[get_name(step.id, input.id)]
+                # handle array type inputs
+                if isinstance(input.type, cwl.CommandInputArraySchema):
+                    if input.type.items == "File":
+                        for file in step_inputs[get_name(step.id, input.id)]:
+                            dax_job_args.append(dax.File(workflow_files[file]))
+                    elif input.type.items == "string":
+                        input_string_arr_id = step_inputs[get_name(step.id, input.id)]
 
-                arg_string = ""
-                if input.type == "string[]":
-                    separator = " " if input.inputBinding.itemSeparator is None \
+                        separator = " " if input.inputBinding.itemSeparator is None \
                                         else input.inputBinding.itemSeparator
 
-                    arg_string += separator.join(
-                        workflow_input_strings[input_string_id]
-                    )
-                elif input.type == "string":
-                    arg_string += workflow_input_strings[input_string_id]
-
-                dax_job_args.append(arg_string)
+                        dax_job_args.append(
+                            # TODO: currently only accounting for input strings that
+                            #       are inputs to the entire workflow
+                            separator.join(workflow_input_strings[
+                                input_string_arr_id
+                            ])
+                        )
 
         log.debug("Adding job: {0}, with args: {1}".format(
             dax_job.name,
