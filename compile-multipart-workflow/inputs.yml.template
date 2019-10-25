@@ -1,4 +1,4 @@
 tarball:
     class: File
-    path: src.tar.gz
+    path: $INPUT_DIR/src.tar.gz
 filenames_to_extract: ["src/source_1.cpp", "src/source_2.cpp"]
