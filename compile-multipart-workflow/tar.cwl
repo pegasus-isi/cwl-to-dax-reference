@@ -2,7 +2,7 @@
 cwlVersion: v1.0
 class: CommandLineTool
 baseCommand: /usr/bin/tar
-arguments: ["-xzvf"]
+arguments: ["--strip", "1", "-xzvf"]
 inputs:
     to_extract:
         type: string[]
@@ -18,9 +18,9 @@ outputs:
     source_file_1:
         type: File
         outputBinding:
-            glob: "src/source_1.cpp"
+            glob: "source_1.cpp"
 
     source_file_2:
         type: File
         outputBinding:
-            glob: "src/source_2.cpp"
+            glob: "source_2.cpp"
