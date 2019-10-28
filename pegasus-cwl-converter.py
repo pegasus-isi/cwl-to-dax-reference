@@ -11,8 +11,8 @@ from pprint import pformat
 from yaml import Loader, load
 
 # TODO: these need to be changed when this script is added to pegasus master
-#sys.path.insert(0, "/nfs/u2/tanaka/pegasus/lib/pegasus/python")
-sys.path.insert(0, "/Users/ryantanaka/ISI/pegasus/dist/pegasus-5.0.0dev/lib/pegasus/python")
+sys.path.insert(0, "/local-scratch/tanaka/pegasus/lib/pegasus/python")
+#sys.path.insert(0, "/Users/ryantanaka/ISI/pegasus/dist/pegasus-5.0.0dev/lib/pegasus/python")
 import Pegasus.DAX3 as dax
 import cwl_utils.parser_v1_0 as cwl
 
@@ -95,7 +95,7 @@ class ReplicaCatalog:
 
     # TODO: account for more complex entries into the catalog
     def add_item(self, lfn, pfn, site):
-        entry = "{0} {1} site={2}".format(lfn, pfn, site)
+        entry = "{0} file://{1} site={2}".format(lfn, pfn, site)
         log.debug("Adding to RC: '{}'".format(entry))
         self.entries.add(entry)
 
@@ -108,32 +108,45 @@ class ReplicaCatalog:
 
 class TransformationCatalog:
 
-    Entry = namedtuple("Entry", ["base_command", "is_stageable"])
+    Entry = namedtuple("Entry", ["base_command", "is_stageable", "site", "pfn"])
 
     # TODO: make this more comprehensive
-    def __init__(self):
+    def __init__(self, stageables_directory):
         self.entries = set()
+        self.stageables_directory = stageables_directory
 
     # TODO: account for more complex entries into the catalog
     # TODO: this will need to write to YAML file in 5.0
     # TODO: if pfn is relative, then assume stageable,
     #       else assume it isn't. Need to see if there is a
     #       field in command line tool that specifies
-    #       whether or not this tool is stageable
-    def add_item(self, base_command):
-        is_stageable = os.path.isabs(base_command)
+    #       whether or not this tool is stageable (possibly place this
+    #       information in a separate yaml file)
+    def add_item(self, base_command, pfn):
+        is_stageable = not os.path.isabs(pfn)
+
+        # TODO: site may need to be specified in another yaml file 
+        site = ""
 
         if is_stageable:
             log.warning(("CommandLineTool.baseName: '{}', is an absolute path, "
                         "assuming to be NOT stageable.").format(base_command))
-            log.debug("Adding to TC: {}".format(base_command))
+
+            site = "local"
+            pfn = "file://" + os.path.join(
+                        os.path.abspath(self.stageables_directory), 
+                        pfn
+                     )
 
         else:
+            site = "condorpool"
             log.warning(("CommandLineTool.baseName: '{}', is not an absolute path, "
                         "assuming to be stageable.").format(base_command))
-            log.debug("Adding to TC: {}, type: STAGEABLE".format(base_command))
 
-        self.entries.add(TransformationCatalog.Entry(base_command, is_stageable))
+
+        entry = TransformationCatalog.Entry(base_command, is_stageable, site, pfn)
+        log.debug("Adding to TC: {}".format(entry))
+        self.entries.add(entry)
 
     def write_catalog(self, filename):
         log.info("Writing tranformation catalog to {}".format(filename))
@@ -141,13 +154,12 @@ class TransformationCatalog:
             for entry in self.entries:
                 tc.write("tr {} {{\n".format(entry.base_command))
                 # TODO: handle different sites
-                tc.write("    site condorpool {\n")
-                tc.write("        pfn \"{}\"\n".format(entry.base_command))
-                if not entry.is_stageable:
+                tc.write("    site {} {{\n".format(entry.site))
+                tc.write("        pfn \"{}\"\n".format(entry.pfn))
+                if entry.is_stageable:
                     tc.write("        type \"STAGEABLE\"\n")
                 tc.write("    }\n")
                 tc.write("}\n")
-
 # --- cwl -> dax conversion  ---------------------------------------------------------
 
 def main():
@@ -162,7 +174,7 @@ def main():
 
     adag = dax.ADAG("dag-generated-from-cwl", auto=True)
     rc = ReplicaCatalog()
-    tc = TransformationCatalog()
+    tc = TransformationCatalog(workflow_file_dir)
 
     # process initial input file(s)
     # TODO: need to account for the different fields for a file class
@@ -216,10 +228,13 @@ def main():
         cwl_command_line_tool = cwl.load_document(step.run) if isinstance(step.run, str) \
                                                                     else step.run
 
-        dax_executable = dax.Executable(cwl_command_line_tool.baseCommand)
+        executable_name = os.path.basename(cwl_command_line_tool.baseCommand) if \
+            os.path.isabs(cwl_command_line_tool.baseCommand) else cwl_command_line_tool.baseCommand
+
+        dax_executable = dax.Executable(executable_name)
 
         # add executable to transformation catalog
-        tc.add_item(cwl_command_line_tool.baseCommand)
+        tc.add_item(executable_name, cwl_command_line_tool.baseCommand)
 
         # create job with executable
         dax_job = dax.Job(dax_executable)
@@ -253,7 +268,6 @@ def main():
                 if input.type.items == "File":
                     file_ids = step_inputs[get_name(step.id, input.id)]
                     for file_id in file_ids:
-                        log.debug(file)
                         file = dax.File(workflow_files[file_id])
                         log.debug("Adding link ({0} -> {1})".format(
                                         file_id,
@@ -341,6 +355,25 @@ def main():
         # add job to DAG
         adag.addJob(dax_job)
 
+    '''
+    # TODO: fix this, can't have forward slash in lfn, so replacing
+    # with "." for now to get this working
+    for filename, file in adag.files.items():
+        if "/" in filename:
+            file.name.replace("/", ".")
+
+    # TODO: fix this, can't have forward slash in lfn, so replacing
+    # with "." for now to get this working
+    for jobid, job in adag.jobs.items():
+        for used in job.used:
+            if "/" in used.name:
+                used.name = used.name.replace("/", ".")
+
+        for arg in job.arguments:
+            if isinstance(arg, dax.File):
+                if "/" in arg.name:
+                    arg.name = arg.name.replace("/", ".")
+    '''
     rc.write_catalog("rc.txt")
     tc.write_catalog("tc.txt")
 
